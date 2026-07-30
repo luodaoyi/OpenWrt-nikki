@@ -139,14 +139,6 @@ jobs:
           echo "name=$run_name" >> "$GITHUB_OUTPUT"
           ls -lh "dist/$run_name" "dist/$run_name.sha256"
 
-      - name: Upload packages
-        uses: actions/upload-artifact@v7
-        with:
-          name: nikki-mihomo-${{ steps.metadata.outputs.mihomo_version }}-qwrt-a73
-          path: dist
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
