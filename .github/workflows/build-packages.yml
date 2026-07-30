@@ -1,70 +1,130 @@
-name: build-packages
+name: Build Nikki for QWRT A73
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - qwrt-a73
+    paths:
+      - .github/workflows/build-packages.yml
+      - mihomo-meta/**
+      - nikki/**
+      - luci-app-nikki/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nikki-qwrt-a73-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_ARCH: aarch64_cortex-a53
+  SDK_VERSION: 24.10.6
+  ROUTER_ARCH: aarch64_cortex-a73_neon-vfpv4
 
 jobs:
   build:
-    name: ${{ matrix.arch }}-${{ matrix.branch }} build
+    name: Mihomo + Nikki + LuCI zh-cn
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - arm_cortex-a5_vfpv4
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a8_vfpv3
-          - arm_cortex-a9
-          - arm_cortex-a9_vfpv3-d16
-          - arm_cortex-a9_neon
-          - arm_cortex-a15_neon-vfpv4
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_cortex-a76
-          - aarch64_generic
-          - mips_24kc
-          - mips_4kec
-          - mips_mips32
-          - mipsel_24kc
-          - mipsel_24kc_24kf
-          - mipsel_74kc
-          - mipsel_mips32
-          - mips64_octeonplus
-          - riscv64_riscv64
-          - riscv64_generic
-          - loongarch64_generic
-          - i386_pentium4
-          - x86_64
-        branch:
-          - openwrt-24.10
-          - openwrt-25.12
-          - SNAPSHOT
-        exclude:
-          - arch: mips_4kec
-            branch: openwrt-25.12
-          - arch: mips_4kec
-            branch: SNAPSHOT
-          - arch: riscv64_riscv64
-            branch: openwrt-25.12
-          - arch: riscv64_riscv64
-            branch: SNAPSHOT
-          - arch: riscv64_generic
-            branch: openwrt-24.10
+    timeout-minutes: 120
 
     steps:
-      - name: checkout
-        uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
-      - name: build
-        uses: openwrt/gh-action-sdk@main
+      - name: Read package versions
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "mihomo_version=$(sed -n 's/^PKG_VERSION:=//p' mihomo-meta/Makefile)" >> "$GITHUB_OUTPUT"
+          echo "nikki_version=$(sed -n 's/^PKG_VERSION:=//p' nikki/Makefile)" >> "$GITHUB_OUTPUT"
+          echo "luci_version=$(sed -n 's/^PKG_VERSION:=//p' luci-app-nikki/Makefile)" >> "$GITHUB_OUTPUT"
+
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@797d0e3d0eb13b355c3447f60d0179d4b43089e2
         env:
-          ARCH: ${{ matrix.arch }}-${{ matrix.branch }}
+          ARCH: ${{ env.SDK_ARCH }}-${{ env.SDK_VERSION }}
           FEEDNAME: nikki
-          PACKAGES: mihomo-alpha mihomo-meta nikki luci-app-nikki
+          PACKAGES: mihomo-meta nikki luci-app-nikki
           NO_REFRESH_CHECK: true
 
-      - name: upload
+      - name: Collect and verify packages
+        env:
+          MIHOMO_VERSION: ${{ steps.metadata.outputs.mihomo_version }}
+          NIKKI_VERSION: ${{ steps.metadata.outputs.nikki_version }}
+          LUCI_VERSION: ${{ steps.metadata.outputs.luci_version }}
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          package_dir="bin/packages/${SDK_ARCH}/nikki"
+          test -d "$package_dir"
+          ls -l "$package_dir"
+
+          shopt -s nullglob
+          mihomo_packages=("$package_dir"/mihomo-meta_*.ipk)
+          nikki_packages=("$package_dir"/nikki_*.ipk)
+          luci_packages=("$package_dir"/luci-app-nikki_*.ipk)
+          language_packages=("$package_dir"/luci-i18n-nikki-zh-cn_*.ipk)
+          test "${#mihomo_packages[@]}" -eq 1
+          test "${#nikki_packages[@]}" -eq 1
+          test "${#luci_packages[@]}" -eq 1
+          test "${#language_packages[@]}" -eq 1
+
+          package_control() {
+            tar -xOzf "$1" ./control.tar.gz | tar -xzO ./control
+          }
+
+          mihomo_control="$(package_control "${mihomo_packages[0]}")"
+          nikki_control="$(package_control "${nikki_packages[0]}")"
+          luci_control="$(package_control "${luci_packages[0]}")"
+          language_control="$(package_control "${language_packages[0]}")"
+
+          grep -Fx "Package: mihomo-meta" <<< "$mihomo_control"
+          grep -Fx "Architecture: $SDK_ARCH" <<< "$mihomo_control"
+          grep -Fx "Package: nikki" <<< "$nikki_control"
+          grep -Fx "Architecture: $SDK_ARCH" <<< "$nikki_control"
+          if grep -Fq "kmod-dummy" <<< "$nikki_control"; then
+            echo "nikki package still has a hard kmod-dummy dependency" >&2
+            exit 1
+          fi
+          grep -Fx "Package: luci-app-nikki" <<< "$luci_control"
+          grep -Fx "Architecture: all" <<< "$luci_control"
+          grep -Fx "Package: luci-i18n-nikki-zh-cn" <<< "$language_control"
+          grep -Fx "Architecture: all" <<< "$language_control"
+          tar -xOzf "${language_packages[0]}" ./data.tar.gz \
+            | tar -tz \
+            | grep -Fx "./usr/lib/lua/luci/i18n/nikki.zh-cn.lmo"
+
+          mkdir -p dist
+          cp "${mihomo_packages[0]}" \
+            "${nikki_packages[0]}" \
+            "${luci_packages[0]}" \
+            "${language_packages[0]}" \
+            dist/
+
+          cat > dist/BUILD_INFO.txt <<EOF
+          mihomo_version=$MIHOMO_VERSION
+          nikki_version=$NIKKI_VERSION
+          luci_version=$LUCI_VERSION
+          source_commit=$GITHUB_SHA
+          sdk_arch=$SDK_ARCH
+          sdk_version=$SDK_VERSION
+          package_arch=$SDK_ARCH
+          router_arch=$ROUTER_ARCH
+          fake_ip6_dummy_dependency=runtime-conditional
+          EOF
+          (
+            cd dist
+            sha256sum ./*.ipk BUILD_INFO.txt > SHA256SUMS
+          )
+          ls -l dist
+
+      - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
-          name: nikki_${{ matrix.arch }}-${{ matrix.branch }}
-          path: bin/packages/${{ matrix.arch }}/nikki
+          name: nikki-mihomo-${{ steps.metadata.outputs.mihomo_version }}-qwrt-a73
+          path: dist
+          if-no-files-found: error
+          retention-days: 30

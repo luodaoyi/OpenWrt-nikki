@@ -245,6 +245,53 @@ start_service() {
 			return
 		fi
 	fi
+	# configure the optional Fake-IP6 dummy route before starting the core
+	if [ "$core_only" = 0 ] && [ "$proxy_enabled" = 1 ]; then
+		local dns_mode; dns_mode=$(yq -M '.dns.enhanced-mode // ""' "$RUN_PROFILE_PATH")
+		local fake_ip6_range; fake_ip6_range=$(yq -M '.dns.fake-ip-range6 // ""' "$RUN_PROFILE_PATH")
+		if [ "$dns_mode" = "fake-ip" ] && [ -n "$fake_ip6_range" ]; then
+			local dummy_device owned_dummy_device
+			config_get dummy_device "routing" "dummy_device" "nikki-dummy"
+			if [ -f "$DUMMY_DEVICE_FLAG_PATH" ]; then
+				read -r owned_dummy_device < "$DUMMY_DEVICE_FLAG_PATH"
+			fi
+			if [ -n "$owned_dummy_device" ] && [ "$owned_dummy_device" != "$dummy_device" ]; then
+				if ip link show dev "$owned_dummy_device" > /dev/null 2>&1; then
+					log "Profile" "A Nikki-owned Fake-IP6 dummy device from the previous config still exists: $owned_dummy_device."
+					log "App" "Exit."
+					return
+				fi
+				rm -f "$DUMMY_DEVICE_FLAG_PATH"
+				owned_dummy_device=""
+			fi
+			if [ "$owned_dummy_device" = "$dummy_device" ] && ip link show dev "$dummy_device" > /dev/null 2>&1; then
+				:
+			elif ip link show dev "$dummy_device" > /dev/null 2>&1; then
+				log "Profile" "Fake-IP6 dummy device is already owned by another service: $dummy_device."
+				log "App" "Exit."
+				return
+			elif ip link add "$dummy_device" type dummy > /dev/null 2>&1; then
+				printf '%s\n' "$dummy_device" > "$DUMMY_DEVICE_FLAG_PATH"
+			else
+				if ip link show dev "$dummy_device" > /dev/null 2>&1; then
+					log "Profile" "Fake-IP6 dummy device was created concurrently by another service: $dummy_device."
+				else
+					log "Profile" "Fake-IP6 requires dummy device support from the running kernel."
+					log "Profile" "Install a kernel-matched kmod-dummy package or clear dns.fake-ip-range6."
+				fi
+				log "App" "Exit."
+				return
+			fi
+			if ! ip link set dev "$dummy_device" up > /dev/null 2>&1 \
+				|| ! ip -6 route replace "$fake_ip6_range" dev "$dummy_device" > /dev/null 2>&1; then
+				ip link del "$dummy_device" > /dev/null 2>&1
+				rm -f "$DUMMY_DEVICE_FLAG_PATH"
+				log "Profile" "Failed to configure the Fake-IP6 dummy device and route."
+				log "App" "Exit."
+				return
+			fi
+		fi
+	fi
 	# start core
 	log "Core" "Start."
 	procd_open_instance nikki
@@ -323,7 +370,7 @@ service_started() {
 	config_get tun_timeout "proxy" "tun_timeout" 30
 	config_get tun_interval "proxy" "tun_interval" 1
 	## routing config
-	local tproxy_fw_mark tproxy_fw_mask tun_fw_mark tun_fw_mask tproxy_rule_pref tun_rule_pref tproxy_route_table tun_route_table cgroup_id cgroup_name dummy_device
+	local tproxy_fw_mark tproxy_fw_mask tun_fw_mark tun_fw_mask tproxy_rule_pref tun_rule_pref tproxy_route_table tun_route_table cgroup_id cgroup_name
 	config_get tproxy_fw_mark "routing" "tproxy_fw_mark" "0x80"
 	config_get tproxy_fw_mask "routing" "tproxy_fw_mask" "0xFF"
 	config_get tun_fw_mark "routing" "tun_fw_mark" "0x81"
@@ -334,7 +381,6 @@ service_started() {
 	config_get tun_route_table "routing" "tun_route_table" "81"
 	config_get cgroup_id "routing" "cgroup_id" "0x12061206"
 	config_get cgroup_name "routing" "cgroup_name" "nikki"
-	config_get dummy_device "routing" "dummy_device" "nikki-dummy"
 	# prepare config
 	local tproxy_enable; tproxy_enable=0
 	if [ "$tcp_mode" = "tproxy" ] || [ "$udp_mode" = "tproxy" ]; then
@@ -344,8 +390,6 @@ service_started() {
 	if [ "$tcp_mode" = "tun" ] || [ "$udp_mode" = "tun" ]; then
 		tun_enable=1
 	fi
-	local dns_mode; dns_mode=$(yq -M '.dns.enhanced-mode // ""' "$RUN_PROFILE_PATH")
-	local fake_ip6_range; fake_ip6_range=$(yq -M '.dns.fake-ip-range6 // ""' "$RUN_PROFILE_PATH")
 	local tun_device; tun_device=$(yq -M "(.tun | select(.enable) | .device) // (.listeners[] | select(.name == \"$tun_listener_name\" and .type == \"tun\") | .device)" "$RUN_PROFILE_PATH")
 	if [ "$core_only" = 0 ]; then
 		# proxy
@@ -415,11 +459,6 @@ service_started() {
 			fi
 			$FIREWALL_INCLUDE_SH
 		fi
-		if [ "$dns_mode" = "fake-ip" ] && [ -n "$fake_ip6_range" ]; then
-			ip link add "$dummy_device" type dummy
-			ip link set dev "$dummy_device" up
-			ip -6 route add "$fake_ip6_range" dev "$dummy_device"
-		fi
 		# hijack
 		utpl -S "$HIJACK_UT" | nft -f -
 		# check hijack
@@ -453,10 +492,9 @@ cleanup() {
 	local log_clear_at_stop
 	config_get_bool log_clear_at_stop "log" "clear_at_stop" 0
 	## routing config
-	local tproxy_route_table tun_route_table dummy_device
+	local tproxy_route_table tun_route_table
 	config_get tproxy_route_table "routing" "tproxy_route_table" "80"
 	config_get tun_route_table "routing" "tun_route_table" "81"
-	config_get dummy_device "routing" "dummy_device" "nikki-dummy"
 	# clear logs if needed
 	if [  "$log_clear_at_stop" = 1 ]; then
 		echo -n > "$APP_LOG_PATH"
@@ -473,8 +511,15 @@ cleanup() {
 	ip -4 route flush table "$tun_route_table" > /dev/null 2>&1
 	ip -6 route flush table "$tproxy_route_table" > /dev/null 2>&1
 	ip -6 route flush table "$tun_route_table" > /dev/null 2>&1
-	# delete dummy device
-	ip -6 link del "$dummy_device" > /dev/null 2>&1
+	# delete the dummy device only when it was created by Nikki
+	if [ -f "$DUMMY_DEVICE_FLAG_PATH" ]; then
+		local owned_dummy_device
+		read -r owned_dummy_device < "$DUMMY_DEVICE_FLAG_PATH"
+		if [ -n "$owned_dummy_device" ]; then
+			ip -6 link del "$owned_dummy_device" > /dev/null 2>&1
+		fi
+		rm -f "$DUMMY_DEVICE_FLAG_PATH"
+	fi
 	# delete hijack
 	nft delete table inet nikki > /dev/null 2>&1
 	local handles handle
