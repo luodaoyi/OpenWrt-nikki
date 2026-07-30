@@ -6,6 +6,18 @@
 
 在 OpenWrt 上使用 Mihomo 进行透明代理。
 
+> [!IMPORTANT]
+> **QWRT A73 兼容构建（`qwrt-a73` 分支）**
+>
+> 此分支将 `kmod-dummy` 内核模块从强制软件包依赖改为按需能力。常规
+> Redir-Host、IPv4 Fake-IP、TUN 和 TPROXY 配置无需安装 `kmod-dummy` 即可
+> 运行。只有启用 IPv6 Fake-IP（例如 `dns.fake-ip-range6`）时，才需要
+> dummy 网络接口的内核支持。Mihomo 本身仍然需要，预编译套件中已包含
+> `mihomo-meta`。
+>
+> QWRT A73 的 IPK 与自解压 `.run` 安装包可从本 Fork 的
+> [Releases](https://github.com/luodaoyi/OpenWrt-nikki/releases/latest) 下载。
+
 ## 环境要求
 
 - OpenWrt >= 24.10
@@ -96,7 +108,7 @@ make package/luci-app-nikki/compile
 - kmod-nft-socket
 - kmod-nft-tproxy
 - kmod-tun
-- kmod-dummy
+- kmod-dummy（可选；仅 IPv6 Fake-IP 的 dummy 接口路径需要）
 
 ## 贡献者
 

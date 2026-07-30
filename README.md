@@ -6,6 +6,19 @@ English | [中文](README.zh.md)
 
 Transparent Proxy with Mihomo on OpenWrt.
 
+> [!IMPORTANT]
+> **QWRT A73 compatibility build (`qwrt-a73` branch)**
+>
+> This branch makes the `kmod-dummy` kernel module optional instead of a hard
+> package dependency. Normal Redir-Host, IPv4 Fake-IP, TUN, and TPROXY setups
+> can run without installing `kmod-dummy`. Dummy-interface kernel support is
+> only needed when IPv6 Fake-IP (for example, `dns.fake-ip-range6`) is enabled.
+> Mihomo itself is still required and is included as `mihomo-meta` in the
+> prebuilt package set.
+>
+> Download the QWRT A73 IPKs or the self-extracting `.run` installer from this
+> fork's [Releases](https://github.com/luodaoyi/OpenWrt-nikki/releases/latest).
+
 ## Prerequisites
 
 - OpenWrt >= 24.10
@@ -96,7 +109,7 @@ The package files will be found under `bin/packages/your_architecture/nikki`.
 - kmod-nft-socket
 - kmod-nft-tproxy
 - kmod-tun
-- kmod-dummy
+- kmod-dummy (optional; only needed for the IPv6 Fake-IP dummy-interface path)
 
 ## Contributors
 
