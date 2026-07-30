@@ -104,8 +104,11 @@ jobs:
           cp "${mihomo_packages[0]}" \
             "${nikki_packages[0]}" \
             "${luci_packages[0]}" \
-            "${language_packages[0]}" \
             dist/
+          # GitHub Release converts '~' in asset names to '.', so normalize it
+          # before generating checksums and the self-extracting installer.
+          language_name="$(basename "${language_packages[0]}" | tr '~' '.')"
+          cp "${language_packages[0]}" "dist/$language_name"
 
           cat > dist/BUILD_INFO.txt <<EOF
           mihomo_version=$MIHOMO_VERSION
