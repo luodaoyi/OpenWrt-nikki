@@ -7,12 +7,13 @@ on:
       - qwrt-a73
     paths:
       - .github/workflows/build-packages.yml
+      - .github/scripts/qwrt-run/**
       - mihomo-meta/**
       - nikki/**
       - luci-app-nikki/**
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nikki-qwrt-a73-${{ github.ref }}
@@ -40,6 +41,7 @@ jobs:
           set -euo pipefail
           echo "mihomo_version=$(sed -n 's/^PKG_VERSION:=//p' mihomo-meta/Makefile)" >> "$GITHUB_OUTPUT"
           echo "nikki_version=$(sed -n 's/^PKG_VERSION:=//p' nikki/Makefile)" >> "$GITHUB_OUTPUT"
+          echo "nikki_release=$(sed -n 's/^PKG_RELEASE:=//p' nikki/Makefile)" >> "$GITHUB_OUTPUT"
           echo "luci_version=$(sed -n 's/^PKG_VERSION:=//p' luci-app-nikki/Makefile)" >> "$GITHUB_OUTPUT"
 
       - name: Build packages
@@ -54,6 +56,7 @@ jobs:
         env:
           MIHOMO_VERSION: ${{ steps.metadata.outputs.mihomo_version }}
           NIKKI_VERSION: ${{ steps.metadata.outputs.nikki_version }}
+          NIKKI_RELEASE: ${{ steps.metadata.outputs.nikki_release }}
           LUCI_VERSION: ${{ steps.metadata.outputs.luci_version }}
         shell: bash
         run: |
@@ -107,6 +110,7 @@ jobs:
           cat > dist/BUILD_INFO.txt <<EOF
           mihomo_version=$MIHOMO_VERSION
           nikki_version=$NIKKI_VERSION
+          nikki_release=$NIKKI_RELEASE
           luci_version=$LUCI_VERSION
           source_commit=$GITHUB_SHA
           sdk_arch=$SDK_ARCH
@@ -121,6 +125,20 @@ jobs:
           )
           ls -l dist
 
+      - name: Build self-extracting installer
+        id: run_package
+        env:
+          MIHOMO_VERSION: ${{ steps.metadata.outputs.mihomo_version }}
+          NIKKI_VERSION: ${{ steps.metadata.outputs.nikki_version }}
+          NIKKI_RELEASE: ${{ steps.metadata.outputs.nikki_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_name="OpenWrt-nikki-${NIKKI_VERSION}-r${NIKKI_RELEASE}-mihomo-${MIHOMO_VERSION}-QWRT-A73.run"
+          bash .github/scripts/qwrt-run/build.sh dist "$run_name"
+          echo "name=$run_name" >> "$GITHUB_OUTPUT"
+          ls -lh "dist/$run_name" "dist/$run_name.sha256"
+
       - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
@@ -128,3 +146,38 @@ jobs:
           path: dist
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIHOMO_VERSION: ${{ steps.metadata.outputs.mihomo_version }}
+          NIKKI_VERSION: ${{ steps.metadata.outputs.nikki_version }}
+          NIKKI_RELEASE: ${{ steps.metadata.outputs.nikki_release }}
+          RUN_NAME: ${{ steps.run_package.outputs.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          tag="qwrt-a73-nikki-${NIKKI_VERSION}-r${NIKKI_RELEASE}-${short_sha}"
+          title="Nikki ${NIKKI_VERSION}-r${NIKKI_RELEASE} for QWRT A73"
+          notes_file=$(mktemp)
+          trap 'rm -f "$notes_file"' EXIT
+          cat > "$notes_file" <<EOF
+          Automated QWRT A73 build from commit ${GITHUB_SHA}.
+
+          - Nikki: ${NIKKI_VERSION}-r${NIKKI_RELEASE}
+          - Mihomo Meta: ${MIHOMO_VERSION}
+          - Router architecture: ${ROUTER_ARCH}
+          - Package ABI: ${SDK_ARCH} (compatible with this QWRT image)
+          - Fake-IP6: kmod-dummy is optional and checked at runtime
+
+          Use ${RUN_NAME} --verify to verify the embedded payload or run it as root to install.
+          EOF
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes-file "$notes_file"
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file "$notes_file"
+          fi
+          gh release upload "$tag" dist/* --clobber
+          gh release view "$tag" --json url --jq '.url'
