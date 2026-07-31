@@ -4,7 +4,9 @@ set -eu
 SELF="$0"
 MARKER="__NIKKI_PAYLOAD_BELOW__"
 PACKAGE_ARCH="aarch64_cortex-a53"
+PACKAGE_ARCH_PRIORITY=5
 ROUTER_ARCH="aarch64_cortex-a73_neon-vfpv4"
+OPKG_NEEDS_PACKAGE_ARCH=0
 TMP_DIR=""
 SERVICE_SNAPSHOT_ACTIVE=0
 NIKKI_WAS_INSTALLED=0
@@ -20,6 +22,37 @@ die() {
 
 package_installed() {
 	opkg status "$1" 2>/dev/null | grep -q '^Status: .* installed'
+}
+
+opkg_architecture_registered() {
+	opkg print-architecture | awk '{print $2}' | grep -Fx "$1" >/dev/null 2>&1
+}
+
+configure_opkg_architecture() {
+	command -v opkg >/dev/null 2>&1 || die "opkg was not found"
+	opkg_architecture_registered "$ROUTER_ARCH" \
+		|| die "unsupported router architecture; expected $ROUTER_ARCH"
+
+	if opkg_architecture_registered "$PACKAGE_ARCH"; then
+		OPKG_NEEDS_PACKAGE_ARCH=0
+		return
+	fi
+
+	opkg --help 2>&1 | grep -Fq -- '--add-arch' \
+		|| die "opkg cannot temporarily register the bundled package architecture: $PACKAGE_ARCH"
+	opkg --add-arch "$PACKAGE_ARCH:$PACKAGE_ARCH_PRIORITY" print-architecture \
+		| awk '{print $2}' | grep -Fx "$PACKAGE_ARCH" >/dev/null 2>&1 \
+		|| die "opkg failed to register the bundled package architecture: $PACKAGE_ARCH"
+	OPKG_NEEDS_PACKAGE_ARCH=1
+	echo "Using temporary opkg architecture: $PACKAGE_ARCH"
+}
+
+opkg_install() {
+	if [ "$OPKG_NEEDS_PACKAGE_ARCH" -eq 1 ]; then
+		opkg --add-arch "$PACKAGE_ARCH:$PACKAGE_ARCH_PRIORITY" install "$@"
+	else
+		opkg install "$@"
+	fi
 }
 
 restore_service_state() {
@@ -131,12 +164,8 @@ extract_only() {
 
 install_packages() {
 	[ "$(id -u)" = "0" ] || die "installation must run as root"
-	command -v opkg >/dev/null 2>&1 || die "opkg was not found"
 	command -v fw4 >/dev/null 2>&1 || die "firewall4/fw4 was not found"
-	opkg print-architecture | awk '{print $2}' | grep -Fx "$ROUTER_ARCH" >/dev/null 2>&1 \
-		|| die "unsupported router architecture; expected $ROUTER_ARCH"
-	opkg print-architecture | awk '{print $2}' | grep -Fx "$PACKAGE_ARCH" >/dev/null 2>&1 \
-		|| die "opkg does not accept the bundled package architecture: $PACKAGE_ARCH"
+	configure_opkg_architecture
 
 	for dependency in firewall4 kmod-inet-diag kmod-nft-socket kmod-nft-tproxy kmod-tun; do
 		package_installed "$dependency" || die "required firmware package is missing: $dependency"
@@ -191,10 +220,10 @@ install_packages() {
 		/etc/init.d/nikki stop >/dev/null 2>&1 || true
 	fi
 
-	opkg install "$mihomo_ipk"
-	opkg install "$nikki_ipk"
-	opkg install "$luci_ipk"
-	opkg install "$language_ipk"
+	opkg_install "$mihomo_ipk"
+	opkg_install "$nikki_ipk"
+	opkg_install "$luci_ipk"
+	opkg_install "$language_ipk"
 	rm -f /tmp/luci-indexcache
 	rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
 
@@ -219,6 +248,7 @@ Usage:
   sh OpenWrt-nikki-QWRT-A73.run --verify
   sh OpenWrt-nikki-QWRT-A73.run --info
   sh OpenWrt-nikki-QWRT-A73.run --extract DIR
+  sh OpenWrt-nikki-QWRT-A73.run --check-architecture
   sh OpenWrt-nikki-QWRT-A73.run --install
 
 With no argument, the installer runs --install.
@@ -232,6 +262,7 @@ case "${1:---install}" in
 	--verify) verify_only ;;
 	--info) show_info ;;
 	--extract) shift; extract_only "${1:-}" ;;
+	--check-architecture) configure_opkg_architecture; echo "Architecture check passed." ;;
 	--help|-h) usage ;;
 	*) usage; exit 2 ;;
 esac

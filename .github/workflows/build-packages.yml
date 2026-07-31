@@ -34,6 +34,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
+      - name: Test self-extracting installer
+        shell: bash
+        run: bash .github/scripts/qwrt-run/test-installer.sh
+
       - name: Read package versions
         id: metadata
         shell: bash
@@ -140,6 +144,8 @@ jobs:
           run_name="OpenWrt-nikki-${NIKKI_VERSION}-r${NIKKI_RELEASE}-mihomo-${MIHOMO_VERSION}-QWRT-A73.run"
           bash .github/scripts/qwrt-run/build.sh dist "$run_name"
           echo "name=$run_name" >> "$GITHUB_OUTPUT"
+          sh "dist/$run_name" --verify
+          sh "dist/$run_name" --info
           ls -lh "dist/$run_name" "dist/$run_name.sha256"
 
       - name: Publish GitHub Release
@@ -165,6 +171,7 @@ jobs:
           - Router architecture: ${ROUTER_ARCH}
           - Package ABI: ${SDK_ARCH} (compatible with this QWRT image)
           - Fake-IP6: kmod-dummy is optional and checked at runtime
+          - If the firmware omits the compatible ${SDK_ARCH} alias, the installer passes opkg --add-arch for the bundled package installation only and does not modify /etc/opkg/arch.conf.
 
           Use ${RUN_NAME} --verify to verify the embedded payload or run it as root to install.
           EOF
